@@ -729,7 +729,6 @@ export default async function handler(
 ```json
 {
   "compilerOptions": {
-    "incremental": true,
     "baseUrl": ".",
     "paths": {
       "@libs/*": ["libs/*"], // "@libs/*" 라는 경로는 libs폴더를 의미한다.
@@ -740,4 +739,271 @@ export default async function handler(
 ```
 
 - "../../../libs/server/withHandler" -> "@libs/server/withHandler"
--
+- "../../components/abc.ts" -> "@components/abc.ts" 로 쓸 수 있다.
+
+## Authentication
+
+1. 유저가 폰번호를 전송하면 DB에서 검색해서 존재하는지를 판별한다.
+2. 존재하지 않으면 회원가입하고, 존재하면 정보를 DB에서 가져오자.
+3. 그리고 유저를 위한 토큰(랜덤넘버)을 발급한다
+4. 유저의 폰에 랜덤넘버를 보낸다
+5. 유저의 프론트엔드에서는 토큰을 받을 수 있는 화면으로 변경된다.
+6. 유저가 토큰을 입력하면 백엔드에서 토큰을 검색한다.
+7. 토큰을 찾으면 유저 정보를 가져오고, 로그인 하게 한다.
+8. 로그인 상태일 때만 보이는 화면을 구현해야 한다.
+9. 어떤 유저가 API 요청을 보냈는지도 알아야 한다.
+   > 토큰 model 필요.
+
+### 유저를 검색하고 존재하면 데이터를 가져오고 없으면 생성하기
+
+```tsx
+// api/users/enter.tsx
+if (email) {
+  // 클라이언트를 사용해서 DB에서 email 에 해당하는 user를 검색
+  user = await client.user.findUnique({
+    where: {
+      email,
+    },
+  });
+  if (user) console.log("found it.");
+  if (!user) {
+    // 유저가 없으면 생성한다.
+    console.log("Did not find. Will create.");
+    user = await client.user.create({
+      data: {
+        name: "Anonymous",
+        email,
+      },
+    });
+  }
+  console.log(user);
+}
+if (phone) {
+  // 클라이언트를 사용해서 DB에서 phone 에 해당하는 user를 검색
+  user = await client.user.findUnique({
+    where: {
+      phone: +phone,
+    },
+  });
+  if (user) console.log("found it.");
+  if (!user) {
+    console.log("Did not find. Will create.");
+    user = await client.user.create({
+      data: {
+        name: "Anonymous",
+        phone: +phone,
+      },
+    });
+  }
+  console.log(user);
+}
+```
+
+> 이렇게 DB를체크해서 있으면 가져오고 없으면 생성하는 로직은 빈번하기 때문에, 위 코드를 간단히 하는 기능이 이미 갖춰져 있다.
+
+#### upsert : create하거나 update하거나 insert할 때 사용
+
+```tsx
+const user = await client.user.upsert({
+  where: {
+    ...payload,
+  },
+  create: {
+    // 없으면 생성하기
+    name: "Anonymous",
+    ...payload,
+  },
+  update: {}, // 해당 유저를 찾을 경우 어떤 업데이트를 할 것인지
+});
+console.log(user);
+```
+
+## Token 로직
+
+1. `schema.prisma` 에 Token 모델추가
+
+```prisma
+// schema.prisma
+model User {
+  id Int @id @default(autoincrement())
+  phone Int? @unique
+  email String? @unique
+  name String
+  avatar String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  tokens    Token[]
+}
+model Token {
+  id        Int      @id @default(autoincrement())
+  payload   String   @unique // 확인해야 하는 값. 필수이자 유일한 값
+  user      User     @relation(fields: [userId], references: [id]) // userId 는 User모델의 id 임을 명시함
+  userId    Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+2. 코드 작성 후 `npx prisma db push`
+3. 서버도 재시작 해주자
+   > planetscale 의 해당 브랜치의 schema 에 업데이트 됨
+   > ![](readMeImages/2023-01-26-15-15-53.png)
+
+```tsx
+// api/users/enter.tsx
+const user = phone ? { phone: +phone } : { email };
+const payload = Math.floor(100000 + Math.random() * 900000) + "";
+const token = await client.token.create({
+  // 토큰을 생성해서 db에 올림
+  data: {
+    payload,
+    user: {
+      connectOrCreate: {
+        // 생성한 유저와 토큰(payload)를 연결한다.
+        where: {
+          ...user,
+        },
+        create: {
+          name: "Anonymous",
+          ...user,
+        },
+      },
+    },
+  },
+});
+```
+
+> (npx prisma studio)
+> ![](readMeImages/2023-01-26-15-27-29.png)
+
+> connect : 새로운 토큰을 이미 존재하는 유저와 연결<br>
+> create: 새로운 토큰과 유저를 만듬<br>
+> createOrCreate : 유저를 찾고 찾으면 토큰과 connect 하고 찾지 못하면 생성해준다.
+
+## Twilio
+
+> Twilio 는 사람들한테 문자메세지 보내기, robocall, 폰번호 숨기기, 이메일기능 등 기능이 있다.
+
+### 시작하기
+
+1. twilio 사이트에 가입한다
+2. `ACCOUNT SID` 코드를 복사해서, `.env` 파일에 `TWILIO_SID=코드문자열` 을 넣고 저장한다.
+3. `AUTH TOKEN` 코드도 복사해서, `.env` 파일에 `TWILIO_SID=코드문자열` 을 넣고 저장한다.
+
+![](readMeImages/2023-01-26-20-35-46.png)
+
+### 메세지 서비스
+
+1. [Messaging] - [services] - [create messaging service]
+2. `서비스 이름`을 적고 [Notify my users] 선택 - [create messaging service] 클릭
+   ![](readMeImages/2023-01-26-20-38-20.png)
+   ![](readMeImages/2023-01-26-20-39-33.png)
+
+3. Sender Pool 화면이 나오는데, 우선 [Try it out]메뉴-[Get Set Up] 으로 가본다. 메세지 서비스를 시작할수 있다.
+   ![](readMeImages/4.%20.png)
+4. [Start setup] - [select messaging service] 하면 기본적으로 월 1달러에 폰번호를 하나 제공해준다. (trial 로 15달러가 있으니까 1년은 사용한다)
+   ![](readMeImages/2023-01-26-20-43-14.png)
+5. [Provision and add this number] 클릭
+6. [Try SMS] 버튼 클릭하면 메세지를 보내기 위해 필요한 폰번호, api요청을 확인할 수 있는 페이지가 나온다.
+
+![](readMeImages/2023-01-26-21-27-00.png)
+
+- 양식을 채운 후
+- [Send Test SMS] 를 누르면 핸드폰으로 메세지가 온다.
+
+### Twilio SDK : 실제로 메세지 보내기
+
+> 필수: 대시보드에 있는`ACCOUNT SID` 와 `AUTH TOKEN` 코드를 .env 파일에 제대로 저장했는지 확인한다.<br> > [Messaging]-[Service] 에서 Sid 코드도 .env 에 복사해야 한다. (test로 나 자신에게 보내야 하므로)
+> 폰번호도 .env 파일에 추가하면 편리함
+
+![](readMeImages/2023-01-26-23-20-57.png)
+
+1. `npm i twilio` 설치
+2. `const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);` :twilio 를 import 한 뒤 twilio 클라이언트를 생성한다.
+3. twilio 클라이언트를 생성하고 문자를 보내는 코드를 작성한다.
+
+```tsx
+import twilio from "twilio";
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+
+// twilio 클라이언트를 생성
+const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_TOKEN);
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const { phone, email } = req.body;
+  const user = phone ? { phone: +phone } : email ? { email } : null;
+  if (!user) return res.status(400).json({ ok: false });
+  const payload = Math.floor(100000 + Math.random() * 900000) + "";
+  const token = await client.token.create({
+    data: {
+      payload,
+      user: {
+        connectOrCreate: {
+          where: {
+            ...user,
+          },
+          create: {
+            name: "Anonymous",
+            ...user,
+          },
+        },
+      },
+    },
+  });
+  if (phone) {
+    // 메세지를 생성하고 보낸다.
+    const message = await twilioClient.messages.create({
+      messagingServiceSid: process.env.TWILIO_MSID,
+      to: process.env.MY_PHONE!, // !는 확실히 존재하는 변수임을 Typescript에게 알려준다.
+      body: `Your login token is ${payload}.`,
+    });
+    console.log(message);
+  }
+  return res.json({
+    ok: true,
+  });
+}
+
+export default withHandler("POST", handler);
+```
+
+> console.log(message) 로 출력된 값
+> ![](readMeImages/2023-01-26-23-37-13.png)
+
+### Sand Grid이메일 보내기
+
+1. 대시보드 - [Explore Products] 메뉴 - [Email] 을 클릭하면 [SendGrid](https://sendgrid.com/solutions/email-api/) 사이트로 이동한다.
+2. [Try for Free] 버튼을 누르고 회원가입을 한다.
+3. [Create a Single Sender] 버튼을 누른다.
+
+![](readMeImages/2023-01-27-00-24-07.png) 4. 이메일, 닉네임 등 필수입력사항을 기입한 뒤 입력한 메일주소로 verify 하면 된다. 5. sendgrid에서 [Email API] - [Integration Guide] - [Web API]
+
+![](readMeImages/2023-01-27-00-32-26.png)
+
+6. 언어선택: Node.js
+7. api 키의 이름을 기입한뒤 [Create Key] 를 눌러서 api 를 생성한다.
+8. 해당 api key 를 프로젝트의 .env 파일에 넣는다.
+9. `npm install --save @sendgrid/mail`
+10. 백엔드 코드에 `import mail from "@sendgrid/mail"` 을 적고 이메일을 보내는 코드를 작성한다.
+
+```tsx
+// api/users/enter.tsx
+import mail from "@sendgrid/mail";
+
+const email = await mail.send({
+  from: "abcd@naver.com",
+  to: "abcd@naver.com",
+  subject: "Your Carrot Market Verification Email",
+  text: `Your token is ${payload}`,
+  html: `<strong>Your token is ${payload}</strong>`,
+});
+console.log(email);
+```
+
+> `console.log(email);` 가 찍힌 모습
+> ![](readMeImages/2023-01-27-00-54-29.png)
