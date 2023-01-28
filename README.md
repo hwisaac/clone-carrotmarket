@@ -4,7 +4,7 @@
 
 Next
 
-##
+## Next 시작하기
 
 1. npx create-next-app@latest --typescript
 2. 삭제
@@ -1007,3 +1007,300 @@ console.log(email);
 
 > `console.log(email);` 가 찍힌 모습
 > ![](readMeImages/2023-01-27-00-54-29.png)
+
+## Token UI
+
+> 로그인할 경우에만 UI 를 보이도록 구현하자
+
+- DB 에서 User 가 삭제 될 경우, Token 도 같이 삭제되어야 한다. (Token 의 모델이 user 와 연결돼 있으므로 )
+- @relation 에 onDelete: Cascade : 부모 레코드가 삭제되면 자식 레코드도 같이 삭제됨
+- @relation 에 onDelete: SetNull : 삭제시 user값을 null로 바꾸고 token 은 내버려둠
+
+```prisma
+// @relation 에 onDelete: Cascade 를 추가한다.
+model Token {
+  id        Int      @id @default(autoincrement())
+  payload   String   @unique
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+> 저장후 `npx prisma db push`
+
+1. token 을 서버로 보내는 코드를 작성
+
+> backend
+
+```tsx
+// api/users/confirm.tsx
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const { token } = req.body;
+  console.log(token);
+  res.status(200).end();
+}
+
+export default withHandler("POST", handler);
+```
+
+> frontend
+
+```tsx
+// pages/enter.tsx
+const Enter: NextPage = () => {
+  const [confirmToken, { loading: tokenLoading, data: tokenData }] =
+    useMutation<MutationResult>("/api/users/confirm");
+  const { register: tokenRegister, handleSubmit: tokenHandleSubmit } =
+    useForm<TokenForm>();
+  const onTokenValid = (validForm: TokenForm) => {
+    if (tokenLoading) return;
+    confirmToken(validForm);
+  };
+
+  return <>{/*보여지는 코드*/}</>;
+};
+```
+
+### serverless 세션
+
+> 백엔드에서 iron session 을 이용하여, 유저에게 쿠키를 주고 유저가 요청할 때 누구인지 알 수 있게 하자 <br>
+> iron session : 서명/암호화된 쿠키를 사용하는 NodeJs 의 stateless 세션 툴이다.
+
+#### JWT(Json Web Token) 와 다른점
+
+- JWT 는 암호화되지 않고 서명을 하고, 서명과 함께 토큰을 보낸다.
+- JWT 에서는 서명을 확인하고 신뢰하게 된다.
+- iron session 은 쿠키를 암호화 하고 복호화 하는 과정이 있다.
+
+#### 사용법
+
+1. `npm i iron-session` 로 iron-session 설치
+2. `withIronSessionApiRoute`이 함수로 핸들러(또다른 함수를 리턴하는 함수)를 감싸주면 iron session 이 req 객체 안에 요청하는 세션 유저들을 담아 보내준다.
+
+> 적용 예시
+
+```tsx
+// pages/api/login.ts
+
+import { withIronSessionApiRoute } from "iron-session/next";
+
+export default withIronSessionApiRoute(
+  async function loginRoute(req, res) {
+    // 핸들러
+    // get user from database then:
+    req.session.user = {
+      // req.session.user 생성
+      id: 230,
+      admin: true,
+    };
+    await req.session.save(); // 세션을 저장
+    res.send({ ok: true });
+  },
+  {
+    cookieName: "myapp_cookiename",
+    password: "complex_password_at_least_32_characters_long",
+    // secure: true should be used in production (HTTPS) but can't be used in development (HTTP)
+    cookieOptions: {
+      secure: process.env.NODE_ENV === "production",
+    },
+  }
+);
+```
+
+3. 적용하기
+
+```tsx
+// api/users/confirm.tsx
+// 주어지는 토큰에 해당하는 유저를 db에서 찾고 유저id를 세션에 저장한다.
+import { withIronSessionApiRoute } from "iron-session/next";
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+
+// TS에게 req.session 의 모습을 알려준다
+declare module "iron-session" {
+  interface IronSessionData {
+    user?: {
+      id: number;
+    };
+  }
+}
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const { token } = req.body;
+  // Prisma로 토큰과 일치 하는 데이터를 찾는다.
+  const exists = await client.token.findUnique({
+    where: {
+      payload: token,
+    },
+  });
+  if (!exists) return res.status(404).end();
+  req.session.user = { // 세션객체에에 user 객체를 만들어서 넣는다.
+    id: exists.userId,
+  };
+  await req.session.save(); // 세션을 저장한다.
+  res.status(200).end();
+}
+
+export default withIronSessionApiRoute(withHandler("POST", handler), {
+  cookieName: "carrotsession",
+  password:// password 는 .env 파일에 넣어주자
+});
+```
+
+> 세션이 쿠키에 저장된 모습
+> ![](readMeImages/2023-01-27-21-19-27.png)
+
+```tsx
+// pages/api/users/me.tsx
+
+import { withIronSessionApiRoute } from "iron-session/next";
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+
+declare module "iron-session" {
+  interface IronSessionData {
+    user?: {
+      id: number;
+    };
+  }
+}
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  console.log(req.session.user);
+  const profile = await client.user.findUnique({
+    where: { id: req.session.user?.id },
+  });
+  res.json({
+    ok: true,
+    profile,
+  });
+}
+// "GET" 메소드를 쓴다
+export default withIronSessionApiRoute(withHandler("GET", handler), {
+  cookieName: "carrotsession",
+  password: //  ,
+});
+
+```
+
+> `/api/users/me` url 로 접근시, `console.log(req.session.user)` 에 의해 다음 내용이 출력된다.
+> ![](readMeImages/2023-01-27-21-30-08.png)
+
+```tsx
+// pages.enter.tsx
+// 토큰 데이터가 ok 되면 '/' 으로 라우팅
+const router = useRouter();
+useEffect(() => {
+  if (tokenData?.ok) {
+    router.push("/");
+  }
+}, [tokenData, router]);
+```
+
+### NextAuth.js
+
+> NextAuth 는 Next.js 에서 authentication 구현을 도와주는 패키지이다.<br>
+> 간단한 설정만으로 인증 기능을 처리해준다. (해당 프로젝트에서 사용하진 않을 것임)
+
+## Authorization (FE)
+
+> 인증되지 않은 유저로부터 페이지를 보호하는 훅을 만들어보자
+
+- 로그인하지 않은 채로 핸들러를 요청하면, id값이 없기 때문에 에러가 난다. 이런 에러에 대한 처리도 해줘야 한다.
+
+1. 유저가 로그인 상태인지 아닌지 체크하자
+
+```tsx
+// lib/server/withHandler.ts
+export interface ResponseType {
+  ok: boolean;
+  [key: string]: any;
+}
+interface ConfigType {
+  method: "GET" | "POST" | "DELETE";
+  handler: (req: NextApiRequest, res: NextApiResponse) => void;
+  isPrivate?: boolean; // 이 값으로 로그인 여부 체크
+}
+export default function withHandler({
+  method,
+  isPrivate = true,
+  handler,
+}: ConfigType) {
+  return async function (
+    req: NextApiRequest,
+    res: NextApiResponse
+  ): Promise<any> {
+    if (req.method !== method) {
+      return res.status(405).end();
+    }
+    // private 이고 user 가 없으면, 에러를 발생시킨다.
+    if (isPrivate && !req.session.user) {
+      return res.status(401).json({ ok: false, error: "Plz log in." });
+    }
+    try {
+      await handler(req, res);
+    } catch (error) {
+      console.log(error);
+      return res.status(500).json({ error });
+    }
+  };
+}
+```
+
+> 로그인하지 않은 채로 api 요청시
+> ![](readMeImages/2023-01-28-22-24-29.png)
+
+### useUser
+
+- 유저데이터에 접근할 수 있는 훅을 만들고 각 페이지에서 데이터를 불러오자 (페이지를 개별적인 관점으로 관리)
+
+```ts
+// libs/client/useUser.ts
+// 유저 정보를 가져오는 훅
+import { useRouter } from "next/router";
+import { useEffect, useState } from "react";
+
+export default function useUser() {
+  const [user, setUser] = useState();
+  const router = useRouter();
+  useEffect(() => {
+    fetch("/api/users/me")
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.ok) {
+          return router.replace("/enter"); // 히스토리에 남지 않게 그냥 페이지를 교체할때 replace 쓴다
+        }
+        setUser(data.profile);
+      });
+  }, [router]);
+  return user;
+}
+```
+
+> 개선할 점: api 요청으로 데이터를 가져올 때 , 캐싱해서 쓰는 것이 네트워크 자원을 절약하는 데 좋다. <br>
+> SWR 을 사용해 보자!
+
+### SWR (State While Revalidate) : HTTP 캐시 무효화 전략
+
+- 유저가 홈 화면으로 간 경우 useUser 훅으로 API 호출을 해서 정보를 가져온다. 프로필 페이지로 갔따가 다시 홈 화면으로 돌아온 경우, SWR 은 데이터를 다시 요청하지 않고 예전 데이터를 가져온다. 따라서, 로딩을 하지 않는다. 동시에 SWR 은 API 요청을 보내서 데이터 내용이 바뀌었는지 체크를 한다. 새로운 사항이 있으면 업데이트를 해준다.
+
+> 위에 작성된 useUser 훅을 SWR 로 교체 해보자
+
+- `npm i swr` 설치
