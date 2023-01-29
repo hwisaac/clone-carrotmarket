@@ -1304,3 +1304,591 @@ export default function useUser() {
 > 위에 작성된 useUser 훅을 SWR 로 교체 해보자
 
 - `npm i swr` 설치
+- `const {data, error} = useSWR("URL_key", fetcherFn)` URL_key 는 API요청 URL 이자 캐싱할때의 key 값이다. 즉 동일한 url 으로 요청을 보내면 동일한 캐시 데이터를 사용하게 된다.
+
+```ts
+// libs/client/useUser.ts
+import { useRouter } from "next/router";
+import { useEffect } from "react";
+import useSWR from "swr";
+
+export default function useUser() {
+  const { data, error } = useSWR("/api/users/me");
+  const router = useRouter();
+  useEffect(() => {
+    if (data && !data.ok) {
+      router.replace("/enter");
+    }
+  }, [data, router]);
+  return { user: data?.profile, isLoading: !data && !error };
+}
+```
+
+## 참고
+
+> Next 가 리로드 될때마다 Prisma Client 가 생성되어 DB에 연결되길 반복되는데, DB 에 Prisma Client 가 무한정 연결될 수는 없다. <br>
+
+```ts
+import { PrismaClient } from "@prisma/client";
+
+declare global {
+  var client: PrismaClient | undefined;
+}
+
+// client 는 global object 에 저장돼 있는 client 를 사용한다.
+// 만약 없으면 새로운 PrismaClient 를 생성한다.
+const client = global.client || new PrismaClient();
+
+// 개발환경일 경우 global.client 에 client 를 저장
+if (process.env.NODE_ENV === "development") global.client = client;
+
+export default client;
+```
+
+- 처음 서버가 실행되면 new PrismaClient 가 client 와 global.client 에 저장된다.
+- 만약 리로드 되면, global.client 가 client 가 된다.
+
+## Products
+
+- 홈화면의 제품 정보를 DB에서 가져와서 보여주자
+
+1. Model
+2. DB
+3. Mutation
+4. SWR
+
+```prisma
+// schema.prisma
+model User {
+  id        Int       @id @default(autoincrement())
+  phone     String?   @unique
+  email     String?   @unique
+  name      String
+  avatar    String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  tokens    Token[]
+  products  Product[]
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      Int
+  image       String
+  name        String
+  price       Int
+  description String   @db.MediumText // 문자길이를 좀 늘려주자. 기본 191자밖에 안됨
+}
+```
+
+### products api
+
+> product를 업로드 하고 전체 products 를 home 화면에 출력하기
+
+```tsx
+// api/products
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  // 같은 URL 에 GET과 POST 둘다 있어야 한다.
+  if (req.method === "GET") {
+    const products = await client.product.findMany({}); //전부 가져오기
+    res.json({
+      ok: true,
+      products,
+    });
+  }
+  if (req.method === "POST") {
+    // product 업로드
+    const {
+      body: { name, price, description },
+      session: { user },
+    } = req;
+    const product = await client.product.create({
+      data: {
+        name,
+        price: +price,
+        description,
+        image: "xx",
+        user: {
+          connect: {
+            id: user?.id,
+          },
+        },
+      },
+    });
+    res.json({
+      ok: true,
+      product,
+    });
+  }
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET", "POST"],
+    handler,
+  })
+);
+```
+
+```tsx
+// pages/products/upload.tsx
+
+import { useEffect } from "react";
+import { Product } from "@prisma/client";
+import { useRouter } from "next/router";
+
+interface UploadProductMutation {
+  ok: boolean;
+  product: Product; // prisma 가 만들어준 타입
+}
+
+const Upload: NextPage = () => {
+  const router = useRouter();
+  const { register, handleSubmit } = useForm<UploadProductForm>();
+  const [uploadProduct, { loading, data }] =
+    useMutation<UploadProductMutation>("/api/products"); // useMutation 은 POST 메소드를 사용한다.
+  const onValid = (data: UploadProductForm) => {
+    if (loading) return;
+    uploadProduct(data);
+  };
+  useEffect(() => {
+    if (data?.ok) {
+      router.push(`/products/${data.product.id}`);
+    }
+  }, [data, router]);
+  // ...
+```
+
+![](readMeImages/2023-01-29-19-51-20.png)
+![](readMeImages/2023-01-29-19-53-01.png)
+
+```ts
+// pages/index.tsx
+import useSWR from "swr";
+import { Product } from "@prisma/client";
+
+interface ProductsResponse {
+  ok: boolean;
+  products: Product[];
+}
+
+const Home: NextPage = () => {
+  const { user, isLoading } = useUser();
+  const { data } = useSWR<ProductsResponse>("/api/products"); // useSWR 은 GET 메소드를 사용
+  console.log(data)
+  return (
+    <Layout title='홈' hasTabBar>
+      <Head>
+        <title>Home</title>
+      </Head>
+      <div className='flex flex-col space-y-5 divide-y'>
+        {data?.products?.map((product) => (
+          <Item
+            id={product.id}
+            key={product.id}
+            title={product.name}
+            price={product.price}
+            comments={1}
+            hearts={1}
+          />
+        ))}
+        // ...
+```
+
+> console.log(data)
+> ![](readMeImages/2023-01-29-20-11-03.png)
+
+### product detail
+
+> 상품 상세 페이지를 구현하자.
+
+```ts
+// pages/api/products/[id].ts
+
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  // 프론트에 router.query 가 있듯이 백엔드에는 req.query 가 있음
+  const { id } = req.query;
+  const product = await client.product.findUnique({
+    where: {
+      id: +id.toString(),
+    },
+    include: {
+      user: {
+        select: {
+          // user 가 가지는 데이터중 id,name,avatar 만 선택해서 가져오자
+          id: true,
+          name: true,
+          avatar: true,
+        },
+      },
+    },
+  });
+  console.log(product);
+  res.json({ ok: true, product });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+> console.log(product)
+> ![](readMeImages/2023-01-29-22-30-36.png)
+
+```ts
+// pages/products/[id].tsx
+const ItemDetail: NextPage = () => {
+  const router = useRouter();
+  const { data, error } = useSWR(
+    router.query.id ? `/api/products/${router.query.id}` : null
+  ); // url 에 있는 id 에 해당하는 데이터를 요청 (삼항연산자로 라우터가 mount 중인 상황에 대한 방어코드도 작성하자)
+    return (
+    <Layout canGoBack>
+      <div className="px-4  py-4">
+	@@ -11,25 +18,24 @@ const ItemDetail: NextPage = () => {
+          <div className="flex cursor-pointer py-3 border-t border-b items-center space-x-3">
+            <div className="w-12 h-12 rounded-full bg-slate-300" />
+            <div>
+              <p className="text-sm font-medium text-gray-700">
+                {data?.product?.user?.name}
+              </p>
+              <Link href={`/users/profiles/${data?.product?.user?.id}`}>
+                <a className="text-xs font-medium text-gray-500">
+                  View profile &rarr;
+                </a>
+              </Link>
+            </div>
+          </div>
+          <div className="mt-5">
+            <h1 className="text-3xl font-bold text-gray-900">
+              {data?.product?.name}
+            </h1>
+            <span className="text-2xl block mt-3 text-gray-900">
+              ${data?.product?.price}
+            </span>
+            <p className=" my-6 text-gray-700">{data?.product?.description}</p>
+```
+
+> 상세페이지 모습
+> ![](readMeImages/2023-01-29-22-27-53.png)
+
+#### Prisma Search API
+
+> 상품을 클릭하면 나오는 디테일 페이지에서 해당 상품과 유사한 아이템들도 가져오고 싶다. '비슷한' 이름을 가진 상품을 골라내기 위한 검색/필터링에는 Prisma Search API 를 사용한다.
+> [[문서]](https://www.prisma.io/docs/reference/api-reference/prisma-client-reference#search)
+
+```ts
+// api/products/[id].ts
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const { id } = req.query;
+  const product = await client.product.findUnique({
+    where: {
+      id: +id.toString(),
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          avatar: true,
+        },
+      },
+    },
+  });
+
+  //
+  const terms = product?.name.split(" ").map((word) => ({
+    name: {
+      contains: word,
+    },
+  }));
+  const relatedProducts = await client.product.findMany({
+    where: {
+      OR: terms,
+      AND: {
+        id: {
+          not: product?.id,
+        },
+      },
+    },
+  });
+  res.json({ ok: true, product, relatedProducts });
+}
+```
+
+```tsx
+// pages/products/[id].tsx
+import { Product, User } from "@prisma/client";
+
+interface ProductWithUser extends Product { // Product 타입에 user 를 추가해준다
+  user: User;
+}
+interface ItemDetailResponse {
+  ok: boolean;
+  product: ProductWithUser;
+  relatedProducts: Product[];
+}
+const ItemDetail: NextPage = () => {
+  const router = useRouter();
+  const { data } = useSWR<ItemDetailResponse>(
+    router.query.id ? `/api/products/${router.query.id}` : null
+  );
+  return (
+    // ...
+    <div className=" mt-6 grid grid-cols-2 gap-4">
+            {data?.relatedProducts.map((product) => (
+              <div key={product.id}>
+                <div className="h-56 w-full mb-4 bg-slate-300" />
+                <h3 className="text-gray-700 -mb-1">{product.name}</h3>
+                <span className="text-sm font-medium text-gray-900">
+                  ${product.price}
+                </span>
+              </div>
+            ))}
+          </div>
+```
+
+> 'Galaxy' term 의 일치로 연관된 Product
+> ![](readMeImages/2023-01-29-23-13-33.png)
+
+### Favorite Products
+
+> 좋아요(하트)를 눌러서 Favorite 목록에 추가하거나 제거 하자
+
+1. Fav 모델 생성
+
+```prisma
+// schema.prisma
+
+model User {
+  id        Int       @id @default(autoincrement())
+  phone     String?   @unique
+  email     String?   @unique
+  name      String
+  avatar    String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  tokens    Token[]
+  products  Product[]
+  fav       Fav[] // 추가
+}
+model Product {
+  id          Int      @id @default(autoincrement())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      Int
+  image       String
+  name        String
+  price       Int
+  description String   @db.MediumText
+  favs        Fav[] // 추가
+}
+
+// Fav 모델 생성
+model Fav {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+```
+
+> 모델을 생성하면 `npx prisma db push`하고 NextJs 를 재실행한다.
+
+2. 백엔드에 fav에 대한 handler 를 만들기
+
+```ts
+// api/products/[id]/fav.ts
+
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+    session: { user },
+  } = req;
+  // findUnique 대신 findFirst 사용(unique 속성이 없으므로)
+  const alreadyExists = await client.fav.findFirst({
+    where: {
+      productId: +id.toString(),
+      userId: user?.id,
+    },
+  });
+  if (alreadyExists) {
+    // 있으면 fav를 삭제하자.
+    // delete 는 unique필드가 있어야만 삭제 할 수 있다
+    // unique 필드가 없으면 client.fav.deleteMany() 사용하자
+    await client.fav.delete({
+      where: {
+        id: alreadyExists.id,
+      },
+    });
+  } else {
+    // 없으면 fav를 생성한다.
+    await client.fav.create({
+      data: {
+        user: {
+          connect: {
+            // user.id 를 가진 user에 연결한다.
+            id: user?.id,
+          },
+        },
+        product: {
+          connect: {
+            // user.id 를 가진 product에 연결한다.
+            id: +id.toString(),
+          },
+        },
+      },
+    });
+  }
+  res.json({ ok: true });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["POST"],
+    handler,
+  })
+);
+```
+
+3. 클릭시 하트를 빨갛게 만들자
+
+#### Optimistic UI Update
+
+> 백엔드에 요청을 보낼 때 백엔드의 응답을 기다리지 않고 변경사항을 반영한다.
+
+- `isLiked` 데이터를 추가해서 눌렀는지 안눌렀는지를 체킹한다. (db에 fav 가 존재하는 거랑 별개로)
+
+```tsx
+// pages/products/[id].tsx
+const ItemDetail: NextPage = () => {
+  const router = useRouter();
+  // SWR 에서 mutate 도 꺼내준다.
+  const { data, mutate } = useSWR<ItemDetailResponse>(
+    router.query.id ? `/api/products/${router.query.id}` : null
+  );
+  // 클릭시 데이터를 보낸다. toggleFav 변수는 요청을 트리거 하는 함수
+  const [toggleFav] = useMutation(`/api/products/${router.query.id}/fav`);
+  const onFavClick = () => {
+    if (!data) return;
+    mutate({ ...data, isLiked: !data.isLiked }, false);
+    toggleFav({});
+  };
+  return (
+    // ...
+              <button
+                onClick={onFavClick}
+                // 클래스명으로 isLinked 변수를 가지고 색을 바꾸자
+                className={cls(
+                  "p-3 rounded-md flex items-center hover:bg-gray-100 justify-center ",
+                  data?.isLiked
+                    ? "text-red-500  hover:text-red-600"
+                    : "text-gray-400  hover:text-gray-500"
+                )}
+              >
+                {data?.isLiked ? (
+                  <svg
+                    className="w-6 h-6"
+                    fill="currentColor"
+                    viewBox="0 0 20 20"
+                    xmlns="http://www.w3.org/2000/svg"
+                  >
+                    <path
+                      fillRule="evenodd"
+                      d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 115.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"
+                      clipRule="evenodd"
+                    ></path>
+                  </svg>
+                ) : (
+                  <svg
+                    className="h-6 w-6 "
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="2"
+                      d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"
+                    />
+                  </svg>
+                )}
+```
+
+> fav버튼 클릭시
+> ![](readMeImages/2023-01-30-01-39-52.png)
+
+- SWR 에서 mutate 를 꺼내서 쓰는이유: 전체 UI가 SWR 캐시에 있는 데이터를 표시하기 때문이다. 버튼 클릭 후 API 요청을 기다려서 버튼의 색상을 변경하지 않고 클릭하자마자 색상을 변경하고 싶기때문에 사용한다.
+- `mutate({새로운 데이터}, Boolean)`:첫번째 인자는 swr의 캐시 데이터(data)대신 사용할 새로운 데이터, 두번째 boolean 인자는 SWR이 api요청을 보내서 재검증(revalidation) 할지 여부를 의미한다.
+- `mutate` 의 새로운 데이터가 기존 캐싱 데이터를 덮어씌우기 때문에 `ui` 가 그 순간 즉각 변경된다.
+
+```tsx
+// api/products/[id]/index.ts
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+    session: { user },
+  } = req;
+  // const product...
+  // const terms...
+  // const relatedProducts ...
+  // const relatedProducts ...
+    const isLiked = Boolean(
+    await client.fav.findFirst({
+      where: {
+        productId: product?.id,
+        userId: user?.id,
+      },
+      select: {
+        id: true,
+      },
+    })
+  );
+
+  res.json({ ok: true, product, isLiked, relatedProducts });
+```
+
+> swr ㅇ
