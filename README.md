@@ -1800,7 +1800,7 @@ export default withApiSession(
 // pages/products/[id].tsx
 const ItemDetail: NextPage = () => {
   const router = useRouter();
-  // SWR 에서 mutate 도 꺼내준다.
+  // SWR 에서 mutate 도 꺼내준다. 이 mutate 는 data 만 변경시키므로 bounded mutate 이다
   const { data, mutate } = useSWR<ItemDetailResponse>(
     router.query.id ? `/api/products/${router.query.id}` : null
   );
@@ -1891,4 +1891,287 @@ async function handler(
   res.json({ ok: true, product, isLiked, relatedProducts });
 ```
 
-> swr ㅇ
+- `bound mutation` : mutate가 여기있는 데이터만 변경
+- `unbound mutation` : 직접요청한 데이터 뿐 아니라 다른 화면에 있는 다른 요청들의 데이터도 변경
+- 즉 하트를 눌러서 즐찾을 하면 bound mutate 로 해당 제품의 즐찾 여부가 요청된다. 하트를 눌러서 즐찾 목록에 있는 제품에 대한 데이터를 변경하는 것은 unbound mutate 이다.
+- unbound mutate 로 어디서든 자유롭게 모든 컴포넌트의 데이터를 변경할 수 있다.
+
+> useUser 훅을 ItemDetail 페이지에서 사용한다고 해보자.
+
+```tsx
+// pages/products/[id].tsx
+import useSWR, { useSWRConfig } from "swr";
+import useMutation from "@libs/client/useMutation";
+import useUser from "@libs/client/useUser";
+
+const ItemDetail: NextPage = () => {
+  const { user, isLoading } = useUser();
+  const router = useRouter();
+  const { mutate } = useSWRConfig(); // unbound mutate
+  const { data, mutate: boundMutate } = useSWR<ItemDetailResponse>( // bound mutate
+    router.query.id ? `/api/products/${router.query.id}` : null
+  );
+  const [toggleFav] = useMutation(`/api/products/${router.query.id}/fav`);
+  const onFavClick = () => {
+    if (!data) return;
+    boundMutate((prev) => prev && { ...prev, isLiked: !prev.isLiked }, false);
+    // mutate("/api/users/me", (prev: any) => ({ ok: !prev.ok }), false); //unbound mutate 는 변경할 데이터를 명시해줘야 한다.
+    toggleFav({});
+  };
+  return (
+```
+
+- unbound mutate 는 변경할 데이터를 명시해줘야 한다.
+- `mutate("/api/users/me")` : 해당 api 로 refetch한다
+- `mutate("/api/users/me", (prev: any) => ({ ok: !prev.ok }), false)` : 해당 데이터로 mutate 한다
+
+## 동네생활
+
+1. 데이터를 실현할 모델(Post model) 을 만들자.
+
+### Models
+
+```prisma
+// schema.prisma
+//...
+model User {
+  id         Int         @id @default(autoincrement())
+  phone      String?     @unique
+  email      String?     @unique
+  name       String
+  avatar     String?
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  tokens     Token[]
+  products   Product[]
+  fav        Fav[]
+  posts      Post[]
+  answers    Answer[]
+  wonderings Wondering[]
+}
+// ...
+model Post {
+  id        Int         @id @default(autoincrement())
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  question  String      @db.MediumText
+  answers   Answer[]
+  wondering Wondering[]
+}
+
+model Answer {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId    Int
+  answer    String   @db.MediumText
+}
+
+model Wondering {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  postId    Int
+}
+```
+
+> write 페이지 구현하기
+
+```ts
+// pages/api/posts/index.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    body: { question },
+    session: { user },
+  } = req;
+  const post = await client.post.create({
+    data: {
+      question,
+      user: {
+        connect: {
+          id: user?.id,
+        },
+      },
+    },
+  });
+  res.json({
+    ok: true,
+    post,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["POST"],
+    handler,
+  })
+);
+```
+
+```tsx
+// pages/community/write.tsx
+import Button from "@components/button";
+import Layout from "@components/layout";
+import TextArea from "@components/textarea";
+import { useForm } from "react-hook-form";
+import useMutation from "@libs/client/useMutation";
+import { useEffect } from "react";
+import { Post } from "@prisma/client";
+import { useRouter } from "next/router";
+
+interface WriteForm {
+  question: string;
+}
+
+interface WriteResponse {
+  ok: boolean;
+  post: Post;
+}
+
+const Write: NextPage = () => {
+  const router = useRouter();
+  const { register, handleSubmit } = useForm<WriteForm>();
+  const [post, { loading, data }] = useMutation<WriteResponse>("/api/posts");
+  const onValid = (data: WriteForm) => {
+    if (loading) return;
+    post(data);
+  };
+  useEffect(() => {
+    if (data && data.ok) {
+      router.push(`/community/${data.post.id}`);
+    }
+  }, [data, router]);
+  return (
+    <Layout canGoBack title="Write Post">
+      <form onSubmit={handleSubmit(onValid)} className="p-4 space-y-4">
+        <TextArea
+          register={register("question", { required: true, minLength: 5 })}
+          required
+          placeholder="Ask a question!"
+        />
+        <Button text={loading ? "Loading..." : "Submit"} />
+      </form>
+    </Layout>
+  );
+```
+
+```ts
+// pages/api/posts/[id].ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+  } = req;
+  const post = await client.post.findUnique({
+    where: {
+      id: +id.toString(),
+    },
+    include: {
+      user: {
+        select: {
+          id: true,
+          name: true,
+          avatar: true,
+        },
+      },
+      answers: {
+        select: {
+          answer: true,
+          id: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              avatar: true,
+            },
+          },
+        },
+      },
+      _count: {
+        select: {
+          answers: true,
+          wondering: true,
+        },
+      },
+    },
+  });
+  res.json({
+    ok: true,
+    post,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+```ts
+// pages/community/[id].ts
+import type { NextPage } from "next";
+import Layout from "@components/layout";
+import TextArea from "@components/textarea";
+import { useRouter } from "next/router";
+import useSWR from "swr";
+import { Answer, Post, User } from "@prisma/client";
+import Link from "next/link";
+
+interface AnswerWithUser extends Answer {
+  user: User;
+}
+
+interface PostWithUser extends Post {
+  user: User;
+  _count: {
+    answers: number;
+    wondering: number;
+  };
+  answers: AnswerWithUser[];
+}
+
+interface CommunityPostResponse {
+  ok: boolean;
+  post: PostWithUser;
+}
+const CommunityPostDetail: NextPage = () => {
+  const router = useRouter();
+  const { data, error } = useSWR<CommunityPostResponse>(
+    router.query.id ? `/api/posts/${router.query.id}` : null
+  );
+  console.log(data);
+  return (
+    // ...
+```
+
+> write 하는 경우
+> ![](readMeImages/2023-01-31-00-13-03.png)
+> ![](readMeImages/2023-01-31-00-18-27.png)
+
+> console.log(data);
+> ![](readMeImages/2023-01-31-01-19-33.png)
