@@ -1983,7 +1983,7 @@ model Wondering {
 }
 ```
 
-> write 페이지 구현하기
+### write 페이지 구현하기
 
 ```ts
 // pages/api/posts/index.ts
@@ -2170,8 +2170,551 @@ const CommunityPostDetail: NextPage = () => {
 ```
 
 > write 하는 경우
-> ![](readMeImages/2023-01-31-00-13-03.png)
-> ![](readMeImages/2023-01-31-00-18-27.png)
+> ![](readMeImages/2023-01-31-00-13-03.png) > ![](readMeImages/2023-01-31-00-18-27.png)
 
 > console.log(data);
 > ![](readMeImages/2023-01-31-01-19-33.png)
+
+### All posts
+
+- "GET" 메서드로 모든 Posts 를 요청할 때 데이터가 너무 많기 때문에 pagination 을 해줘야 한다.
+
+```ts
+// pages/api/posts/index.ts
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    body: { question },
+    session: { user },
+  } = req;
+  if (req.method === "POST") {
+    const post = await client.post.create({
+      data: {
+        question,
+        user: {
+          connect: {
+            id: user?.id,
+          },
+        },
+      },
+    });
+    res.json({
+      ok: true,
+      post,
+    });
+  }
+  if (req.method === "GET") {
+    const posts = await client.post.findMany({
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            avatar: true,
+          },
+        },
+        _count: {
+          select: {
+            wondering: true,
+            answers: true,
+          },
+        },
+      },
+    });
+    res.json({
+      ok: true,
+      posts,
+    });
+  }
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET", "POST"],
+    handler,
+  })
+);
+```
+
+```tsx
+// pages/community/index.tsx
+import useSWR from "swr";
+import { Post, User } from "@prisma/client";
+
+interface PostWithUser extends Post {
+  user: User;
+  _count: {
+    wondering: number;
+    answers: number;
+  };
+}
+
+interface PostsResponse {
+  ok: boolean;
+  posts: PostWithUser[];
+}
+
+const Community: NextPage = () => {
+  // useSWR 사용. api/posts 에 GET 요청을 보낸다
+  const { data } = useSWR<PostsResponse>(`/api/posts`);
+  return (
+    // data 를 이용한 랜더링
+```
+
+### useCoords 훅: 사용자 위치정보를 이용해보기
+
+> `navigator.geolocation` 메서드를 사용하자
+
+```ts
+// libs/client/useCoords.ts
+import { useEffect, useState } from "react";
+
+interface UseCoordState {
+  longitude: number | null;
+  latitude: number | null;
+}
+
+export default function useCoords() {
+  const [coords, setCoords] = useState<UseCoordState>({
+    latitude: null,
+    longitude: null,
+  });
+  const onSuccess = ({
+    coords: { latitude, longitude },
+  }: GeolocationPosition) => {
+    setCoords({ latitude, longitude });
+  };
+  useEffect(() => {
+    navigator.geolocation.getCurrentPosition(onSuccess);
+  }, []);
+  return coords;
+}
+```
+
+```prisma
+model Post {
+  id        Int         @id @default(autoincrement())
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  question  String      @db.MediumText
+    latitude  Float? // 옵셔널
+  longitude Float? // 옵셔널
+  answers   Answer[]
+  wondering Wondering[]
+}
+```
+
+> 특정좌표 범위 내에 있는 post 만 찾아보자
+
+- 경도 및 위도를 소수점 첫째 자리까지 바꿔도 크게 위치가 변동하기 때문에 소수점 둘째 자리(0.01)를 가지고 반경을 조절한다.
+
+```tsx
+//pages/comumunity/index.tsx
+
+const Community: NextPage = () => {
+  const { latitude, longitude } = useCoords();
+  const { data } = useSWR<PostsResponse>(
+    latitude && longitude
+      ? `/api/posts?latitude=${latitude}&longitude=${longitude}`
+      : null
+  ); //  latitude 와 longitude 도 같이 보낸다
+  // Next 는 페이지를 미리 만들어놓으려고 하기 때문에 코드를 실행하더라도 서버사이드에서는 좌표를 가져오는 useEffect가 실행되지 않기 때문에 null 을 초기 값으로 가지므로 null 값으로 생기는 에러를 방어해줘야 한다.
+```
+
+```tsx
+// pages/api/posts/index.ts
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  if (req.method === "POST") {
+    const {
+      body: { question, latitude, longitude },
+      session: { user },
+    } = req;
+// ...
+if (req.method === "GET") {
+    const {
+      query: { latitude, longitude },
+    } = req;
+    const parsedLatitude = parseFloat(latitude.toString());
+    const parsedLongitue = parseFloat(longitude.toString());
+// ...
+```
+
+## Profile
+
+### Models
+
+```prisma
+// schema.prisma
+// 추가 및 수정된 내용
+model User {
+  id              Int         @id @default(autoincrement())
+  phone           String?     @unique
+  email           String?     @unique
+  name            String
+  avatar          String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  tokens          Token[]
+  products        Product[]
+  posts           Post[]
+  answers         Answer[]
+  wonderings      Wondering[]
+  // Review[] 모델이 두번 나오기 때문에 name 으로 구별하기
+  writtenReviews  Review[]    @relation(name: "writtenReviews")
+  receivedReviews Review[]    @relation(name: "receivedReviews")
+  fav             Fav[]
+  sales           Sale[]
+  purchases       Purchase[]
+  record          Record[]
+}
+model Product {
+  id          Int        @id @default(autoincrement())
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  user        User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      Int
+  image       String
+  name        String
+  price       Int
+  description String     @db.MediumText
+  favs        Fav[]
+  sales       Sale[]
+  purchases   Purchase[]
+  records     Record[]
+}
+
+model Review {
+  id           Int      @id @default(autoincrement())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  review       String   @db.MediumText // 길이제한은 medium
+  // User 가 둘이므로 name으로 구별짓기
+  createdBy    User     @relation(name: "writtenReviews", fields: [createdById], references: [id], onDelete: Cascade)
+  createdById  Int
+  // User 가 둘이므로 name으로 구별짓기
+  createdFor   User     @relation(name: "receivedReviews", fields: [createdForId], references: [id], onDelete: Cascade) // createdFor는 그 id를 갖는 user 참조
+  createdForId Int
+}
+
+model Sale {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Purchase {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Fav {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Record {
+  id        Int      @id @default(autoincrement())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  productId Int
+  createdAt DateTime @default(now())
+  kind      Kind
+  updatedAt DateTime @updatedAt
+}
+
+enum Kind {
+  Purchase
+  Sale
+  Fav
+}
+```
+
+- Review 모델은 createdFor와 createdBy 에서 User 모델을 두번이나 각각 가리키는데, Token 을 User에게 가리킬 때마다 relationship 을 반대로도 등록을 해줬어야 했기 떄문에 문제가 발생한다.
+- user 가 token 을 생성했다는 것은, User 모델에서 유저가 어떤 Token 을 생성했는지도 알 수 있어야 한다는 것이다. (즉, Token이 User 를 가리키면 User도 무엇이 자길 가리키는지 알아야 한다)
+- 따라서 User에서 구별할 수 있도록 연결에 서로 다른 이름을 줘야 한다 : @relation(name : ")
+
+### Handler
+
+```ts
+// api/users/me/favs.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    session: { user },
+  } = req;
+  const favs = await client.fav.findMany({
+    where: {
+      userId: user?.id,
+    },
+    include: {
+      product: true,
+    },
+  });
+  res.json({
+    ok: true,
+    favs,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+```ts
+// api/users/me/purchases.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    session: { user },
+  } = req;
+  const purchases = await client.purchase.findMany({
+    where: {
+      userId: user?.id,
+    },
+    include: {
+      product: true,
+    },
+  });
+  res.json({
+    ok: true,
+    purchases,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+```ts
+// api/users/me/sales.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    session: { user },
+  } = req;
+
+  const sales = await client.sale.findMany({
+    where: {
+      userId: user?.id,
+    },
+    include: {
+      product: true,
+    },
+  });
+  res.json({
+    ok: true,
+    sales,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+```ts
+// api/reviews.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    session: { user },
+  } = req;
+  const reviews = await client.review.findMany({
+    where: {
+      createdForId: user?.id,
+    },
+    include: { createdBy: { select: { id: true, name: true, avatar: true } } },
+  });
+  res.json({
+    ok: true,
+    reviews,
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+### FrontEnd
+
+> Profile, Sales, Purchase, Favorites 페이지
+
+```tsx
+// components/product-list.tsx
+import { ProductWithCount } from "pages";
+import useSWR from "swr";
+import Item from "./item";
+
+interface ProductListProps {
+  kind: "favs" | "sales" | "purchases";
+}
+
+interface Record {
+  id: number;
+  product: ProductWithCount;
+}
+
+interface ProductListResponse {
+  [key: string]: Record[];
+}
+
+export default function ProductList({ kind }: ProductListProps) {
+  const { data } = useSWR<ProductListResponse>(`/api/users/me/${kind}`);
+  return data ? (
+    <>
+      {data[kind]?.map((record) => (
+        <Item
+          id={record.product.id}
+          key={record.id}
+          title={record.product.name}
+          price={record.product.price}
+          hearts={record.product._count.favs}
+        />
+      ))}
+    </>
+  ) : null;
+}
+```
+
+```tsx
+// pages/profile/index.tsx
+import type { NextPage } from "next";
+import Link from "next/link";
+import Layout from "@components/layout";
+import useUser from "@libs/client/useUser";
+import useSWR from "swr";
+import { Review, User } from "@prisma/client";
+import { cls } from "@libs/client/utils";
+
+interface ReviewWithUser extends Review {
+  createdBy: User;
+}
+interface ReviewsResponse {
+  ok: boolean;
+  reviews: ReviewWithUser[];
+}
+
+const Profile: NextPage = () => {
+  const { user } = useUser();
+  const { data } = useSWR<ReviewsResponse>("/api/reviews");
+  return (
+    <Layout hasTabBar title="나의 캐럿">
+      <div className="px-4">
+        <div className="flex items-center mt-4 space-x-3">
+          <div className="w-16 h-16 bg-slate-500 rounded-full" />
+          <div className="flex flex-col">
+            <span className="font-medium text-gray-900">{user?.name}</span>
+            <Link href="/profile/edit">
+              <a className="text-sm text-gray-700">Edit profile &rarr;</a>
+            </Link>
+	@@ -86,71 +100,40 @@ const Profile: NextPage = () => {
+            </a>
+          </Link>
+        </div>
+        {data?.reviews.map((review) => (
+          <div key={review.id} className="mt-12">
+            <div className="flex space-x-4 items-center">
+              <div className="w-12 h-12 rounded-full bg-slate-500" />
+              <div>
+                <h4 className="text-sm font-bold text-gray-800">
+                  {review.createdBy.name}
+                </h4>
+                <div className="flex items-center">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <svg
+                      key={star}
+                      className={cls(
+                        "h-5 w-5",
+                        review.score >= star
+                          ? "text-yellow-400"
+                          : "text-gray-400"
+                      )}
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 20 20"
+                      fill="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                    </svg>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 text-gray-600 text-sm">
+              <p>{review.review}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </Layout>
+  );
+};
+```
+
+> useUser 훅으로 user 데이터를 가져온다. 로그인이 아니면 Home 으로 보내면서 페이지를 보호해주는데 로그인 페이지를 제외한 모든 페이지에 보호가 있어야 한다.
+> useUser 를 \_app.tsx 파일에 넣어서 모든 페이지에 적용이 되면서 useUser 를 수정하여 'public' 인자를 받도록 하여 이 값에 따라 보호여부를 결정하도록 코드를 수정해보자 (챌린지)
