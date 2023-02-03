@@ -505,6 +505,7 @@ model User {
 | pscale database create <DB이름> -region <SLUG명> | 해당 지역 서버에 DB를 생성한다.  |
 | pscale connect <DB명>                            | PlanetScale서버의 DB와 연결한다. |
 | npx prisma db push                               | DB정보를 push한다                |
+| npx prisma studio                                | prisma studio 열기               |
 
 #### DB를 생성하고 연결하기
 
@@ -523,10 +524,9 @@ DATABASE_URL = "mysql://127.0.0.1:3306/<DB명>";
 
 #### DB 를 push 해보기
 
-> planetscale 은 mysql 과 '호환'되는 플랫폼이다. 이 호환을 위해서 몇가지 처리해줄 것이 있다.
+> `planetscale` 은 `mysql` 과 '호환'되는 플랫폼이다. 이 호환을 위해서 몇가지 처리해줄 것이 있다.
 
-> foreign key 제약 <br>
-> planetscale 은 mysql 과 달리 foreign 키로 DB에 해당 데이터가 있는지 체크하는 기능이 없기 때문에 안정성을 보완해줘야 한다.
+> `foreign key` 제약 <br> > `planetscale` 은 `mysql` 과 달리 `foreign` 키로 DB에 해당 데이터가 있는지 체크하는 기능이 없기 때문에 안정성을 보완해줘야 한다.
 
 1. `schema.prisma` 파일의 `datasource db` 에다가 `relationMode ="prisma"` 를 추가해준다.
 
@@ -2718,3 +2718,527 @@ const Profile: NextPage = () => {
 
 > useUser 훅으로 user 데이터를 가져온다. 로그인이 아니면 Home 으로 보내면서 페이지를 보호해주는데 로그인 페이지를 제외한 모든 페이지에 보호가 있어야 한다.
 > useUser 를 \_app.tsx 파일에 넣어서 모든 페이지에 적용이 되면서 useUser 를 수정하여 'public' 인자를 받도록 하여 이 값에 따라 보호여부를 결정하도록 코드를 수정해보자 (챌린지)
+
+## STREAMS
+
+> 사람들이 제품을 라이브 쇼케이스할때 작성할 form 을 만들자.
+
+### model
+
+```prisma
+model Stream {
+  id          Int       @id @default(autoincrement())
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  name        String
+  description String    @db.MediumText
+  price       Int
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      Int
+  messages    Message[]
+}
+
+model Message {
+  id        Int      @id @default(autoincrement())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    Int
+  message   String   @db.MediumText
+  stream    Stream   @relation(fields: [streamId], references: [id], onDelete: Cascade)
+  streamId  Int
+}
+```
+
+### form : live stream 을 생성하기 위한 폼
+
+```tsx
+// pages/live/create.tsx
+
+import type { NextPage } from "next";
+import Button from "@components/button";
+import Input from "@components/input";
+import Layout from "@components/layout";
+import TextArea from "@components/textarea";
+import { useForm } from "react-hook-form";
+import useMutation from "@libs/client/useMutation";
+import { useEffect } from "react";
+import { useRouter } from "next/router";
+import { Stream } from "@prisma/client";
+
+interface CreateForm {
+  name: string;
+  price: string;
+  description: string;
+}
+
+interface CreateResponse {
+  ok: boolean;
+  stream: Stream;
+}
+
+const Create: NextPage = () => {
+  const router = useRouter();
+  const [createStream, { loading, data }] =
+    useMutation<CreateResponse>(`/api/streams`);
+  const { register, handleSubmit } = useForm<CreateForm>();
+  const onValid = (form: CreateForm) => {
+    if (loading) return;
+    createStream(form);
+  };
+  useEffect(() => {
+    if (data && data.ok) {
+      router.push(`/streams/${data.stream.id}`);
+    }
+  }, [data, router]);
+  return (
+    <Layout canGoBack title='Go Live'>
+      <form onSubmit={handleSubmit(onValid)} className=' space-y-4 py-10 px-4'>
+        <Input
+          register={register("name", { required: true })}
+          required
+          label='Name'
+          name='name'
+          type='text'
+        />
+        <Input
+          register={register("price", { required: true, valueAsNumber: true })}
+          required
+          label='Price'
+          name='price'
+          type='text'
+          kind='price'
+        />
+        <TextArea
+          register={register("description", { required: true })}
+          name='description'
+          label='Description'
+        />
+        <Button text={loading ? "Loading..." : "Go live"} />
+      </form>
+    </Layout>
+  );
+};
+
+export default Create;
+```
+
+- `valueAsNumber: true` : 스트링 input을 숫자로 바꿔서 받아준다.(form 은 디폴트로 모두 문자열로 받음)
+
+### Handler: stream api
+
+```tsx
+// api/streams/index.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    session: { user },
+    body: { name, price, description },
+  } = req;
+  if (req.method === "POST") {
+    const stream = await client.stream.create({
+      data: {
+        name,
+        price,
+        description,
+        user: {
+          connect: {
+            id: user?.id,
+          },
+        },
+      },
+    });
+    res.json({ ok: true, stream });
+  } else if (req.method === "GET") {
+    const streams = await client.stream.findMany();
+    res.json({ ok: true, streams });
+  }
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET", "POST"],
+    handler,
+  })
+);
+```
+
+```ts
+// api/streams/[id].ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+  } = req;
+  const stream = await client.stream.findUnique({
+    where: {
+      id: +id.toString(),
+    },
+  });
+  res.json({ ok: true, stream });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+- 응답에 `ok : true` 를 넣는 이유는 사용자가 의도하지 않는 input 을 넣을 상황을 방어해주기 위해서이다. (링크를 통해서 이동하지 않고 직접 url 에 id값을 입력해서 응답할 수 없는 경우, `ok` 값으로 404 페이지를 보여줄수 있다.)
+
+> ![](readMeImages/2023-02-03-15-37-26.png) > ![](readMeImages/2023-02-03-15-38-11.png) > ![](readMeImages/2023-02-03-15-40-56.png)
+>
+> > prisma studio
+> > ![](readMeImages/2023-02-03-15-45-50.png)
+
+### Send message: serverless에서 live 채팅 구현하기
+
+```ts
+// pages/api/streams/[id]/messages.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+    body,
+    session: { user },
+  } = req;
+  const message = await client.message.create({
+    data: {
+      message: body.message,
+      stream: {
+        connect: {
+          id: +id.toString(),
+        },
+      },
+      user: {
+        connect: {
+          id: user?.id,
+        },
+      },
+    },
+  });
+  res.json({ ok: true, message });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["POST"],
+    handler,
+  })
+);
+```
+
+```ts
+//pages/streams/[id].tsx
+import useSWR from "swr";
+import { useRouter } from "next/router";
+import { Stream } from "@prisma/client";
+import { useForm } from "react-hook-form";
+import useMutation from "@libs/client/useMutation";
+
+interface StreamResponse {
+  ok: true;
+  stream: Stream;
+}
+
+interface MessageForm { // 채팅 메세지에 대한 form
+  message: string;
+}
+
+const Stream: NextPage = () => {
+  const { user } = useUser();
+  const router = useRouter();
+  const { register, handleSubmit, reset } = useForm<MessageForm>();
+  const { data, mutate } = useSWR<StreamResponse>(
+    router.query.id ? `/api/streams/${router.query.id}` : null
+  );
+  const [sendMessage, { loading, data: sendMessageData }] = useMutation(
+    `/api/streams/${router.query.id}/messages`
+  );
+  const onValid = (form: MessageForm) => {
+    if (loading) return;
+    reset();
+    sendMessage(form);
+  };
+  useEffect(() => {
+    if (sendMessageData && sendMessageData.ok) {
+      mutate();
+    }
+  }, [sendMessageData, mutate]);
+  return (
+    // ...
+            <form
+              onSubmit={handleSubmit(onValid)}
+              className="flex relative max-w-md items-center  w-full mx-auto"
+            >
+              <input
+                type="text"
+                {...register("message", { required: true })}
+                className="shadow-sm rounded-full w-full border-gray-300 focus:ring-orange-500 focus:outline-none pr-12 focus:border-orange-500"
+              />
+              <div className="absolute inset-y-0 flex py-1.5 pr-1.5 right-0">
+                <button className="flex focus:ring-2 focus:ring-offset-2 focus:ring-orange-500 items-center bg-orange-500 rounded-full px-3 hover:bg-orange-600 text-sm text-white">
+                  &rarr;
+                </button>
+              </div>
+            </form>
+```
+
+- stream 에 있는 메세지를 GET 하기: 새 useSWR 을 만들어서 `/api/streams/[id]/messages`로 GET요청을 보낸다 (이미 POST요청을 할 수 있으니깐 RESTful하다)
+
+```ts
+// pages/api/streams/[id]/index.ts
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const {
+    query: { id },
+  } = req;
+  const stream = await client.stream.findUnique({
+    where: {
+      id: +id.toString(),
+    },
+    include: {
+      messages: {
+        select: {
+          id: true,
+          message: true,
+          user: {
+            select: {
+              avatar: true,
+              id: true,
+            },
+          },
+        },
+      },
+    },
+  });
+  res.json({ ok: true, stream });
+}
+```
+
+> 채팅창의 스크롤을 맨 밑으로 유지하는 법
+> 아무런 처리를 해주지 않으면 처음 채팅 화면에 진입할 때 스크롤이 맨 위에 위치하고
+> 새 메세지를 보낼 때 스크롤이 밑으로 늘어나지만 화면은 그대로인 상태가 됩니다
+> 평소 사용하는 채팅 앱 등을 생각해보면 스크롤을 항상 맨 아래로 당겨줘야 합니다
+> useRef와 scrollIntoView 를 사용해서 해결할 수 있습니다.
+
+```js
+// useRef로 스크롤할 DOM을 선택하고 useEffect와 scrollIntoView로 스크롤합니다
+const scrollRef = useRef<HTMLDivElement>(null);
+useEffect(() => {
+scrollRef?.current?.scrollIntoView();
+});
+...
+// 메세지들 목록 맨 밑에 빈 div를 만들어 ref를 설정합니다.
+{data?.stream.messages.map...}
+<div ref={scrollRef}/>
+```
+
+#### 최대한 실시간 경험 제공하기
+
+> SWR 의 캐시를 mutate 하고 가짜 메세지를 직접 추가하자
+
+- `pages/streams/[id].tsx` mutation 이 실행되고 끝나서 랜더링 할때까지 기다리지 말고 메세지를 백엔드로 보내기(`sendMessage(form)`) 전에 mutate 를 하자
+
+```ts
+// pages/streams/[id].ts
+const Stream: NextPage = () => {
+  const { user } = useUser();
+  const router = useRouter();
+  const { register, handleSubmit, reset } = useForm<MessageForm>();
+  const { data, mutate } = useSWR<StreamResponse>(
+    router.query.id ? `/api/streams/${router.query.id}` : null,
+    {
+      refreshInterval: 1000, // 서버를
+    }
+  );
+  const [sendMessage, { loading, data: sendMessageData }] = useMutation(
+    `/api/streams/${router.query.id}/messages`
+  );
+  const onValid = (form: MessageForm) => {
+    if (loading) return;
+    reset();
+    mutate( //
+      (prev) => // (prev)는 캐시의 모든 previous data
+        prev &&
+        ({
+          ...prev,
+          stream: {
+            ...prev.stream,
+            messages: [
+              ...prev.stream.messages,
+              {
+                id: Date.now(),
+                message: form.message,
+                user: {
+                  ...user,
+                },
+              },
+            ],
+          },
+        } as any),
+      false // mutate 의 두번째 인수는 revalidate(백엔드에서 더블체크해줄지)  여부
+    );
+    sendMessage(form);
+  };
+  return (
+```
+
+#### NextJs의 serverless 환경에선 realtime 을 만들 순 없다
+
+> NextJS 와 api 라우터만 쓸 경우 실시간 채팅 기능을 구현할 수 없다. <br>
+> realtime 기능은 서버가 필요하고 클라이언트와 연결을 유지하고 있어야 한다.
+
+#### Prisma Seeding
+
+> seeding 은 테스트를 목적으로 데이터베이스에 페이크 데이터를 엄청 빠르게 생성할 수 있다. <br>
+> 이 기능을 이용해서 라이브스트림을 많이 생성해보자
+
+```ts
+// prisma/seed.ts
+
+import { PrismaClient } from "@prisma/client";
+
+const client = new PrismaClient();
+
+async function main() {
+  [...Array.from(Array(500).keys())].forEach(async (item) => {
+    await client.stream.create({
+      data: {
+        name: String(item),
+        description: String(item),
+        price: item,
+        user: {
+          connect: {
+            id: 1,
+          },
+        },
+      },
+    });
+    console.log(`${item}/500`);
+  });
+}
+
+main()
+  .catch((e) => console.log(e))
+  .finally(() => client.$disconnect());
+```
+
+- [...Array.from(Array(500).keys())] 는 [0,1,...499] 배열
+
+> package.json 에 prisma 라는 새 key를 생성하자
+
+```json
+{
+  "scripts": {
+    // ...
+  },
+  "dependencies" : {
+    // ...
+  }
+  "prisma": {
+    "seed": "ts-node --compiler-options {\"module\":\"CommonJS\"} prisma/seed.ts"
+  }
+}
+```
+
+> 이 명령은 `npx prisma db seed` 명령어로 실행된다.<br>
+> 실행하려면 `ts-node` 가 설치되어야 한다 : `npm install ts-node`
+
+> 다음과 같은 에러가 나는 경우
+> ![](readMeImages/2023-02-03-23-58-36.png)
+
+- 원인: seed.ts 파일에서 id 1인 user를 찾는데 db에는 해당 user가 없기 떄문
+- 해결: prisma studio 에 존재하는 유저 id로 변경하고 seed를 실행하면 된다.
+
+> ![](readMeImages/2023-02-03-23-59-34.png)<br> > ![](readMeImages/2023-02-03-23-59-47.png)
+
+> 다음과 같은 에러가 나는 이유
+> ![](readMeImages/2023-02-04-00-11-52.png)
+
+- 원인: `prisma` 의 connection pool (db에 동시에 연결을 얼마나 할 지)에 부딪혔기 때문
+- `planetscale` 은 무료버전에서 1000개까지 동시 접속이 가능하므로 `prisma` 에도 해당 설정을 해줘야 한다.
+
+```prisma
+// connection 제한을 세팅하고 싶으면 다음 datasource configuration 을 prisma schema 에 설정해야 한다.
+datasource db {
+  provider = "postgresql"
+  url      = "postgresql://johndoe:mypassword@localhost:5432/mydb?connection_limit=5"
+}
+```
+
+```prisma
+// connection pool timeout 을 설정하고 싶을 경우 (디폴트 10)
+datasource db {
+  provider = "postgresql"
+  url      = "postgresql://johndoe:mypassword@localhost:5432/mydb?connection_limit=5&pool_timeout=2"
+}
+```
+
+> seed 생성으로 많은 stream 이 생김
+> ![](readMeImages/2023-02-04-00-19-59.png)
+
+#### pagination
+
+- `prisma` 에는 `pagination` 엔진이 있기 때문에 이를 이용하면 쉽게 구현할 수 있다.
+
+```tsx
+// api/streams/index.ts
+} else if (req.method === "GET") {
+    const streams = await client.stream.findMany({
+      take: 10, // 10개만 가져온다
+      skip: 20, // 앞에 20개는 무시한다
+    });
+    res.json({ ok: true, streams });
+  }
+```
+
+- `GET` 요청을 보낼때 `findMany` 에 인자로 얼마나 가져올 것인지 옵션을 넣어주면 된다.
+- 가져오는 데이터의 갯수를 한정시키면 네트워크 비용을 절약할 수 있다.
+
+```ts
+// api/posts/[id]/index.ts
+const post = await client.post.findUnique({
+
+answers: {
+        select: {
+          answer: true,
+          id: true,
+          user: {
+            select: {
+              id: true,
+              name: true,
+              avatar: true,
+            },
+          },
+        },
+        take: 10,
+        skip: 20,
+      },
+```
