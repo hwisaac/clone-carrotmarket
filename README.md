@@ -3221,24 +3221,306 @@ datasource db {
 
 - `GET` 요청을 보낼때 `findMany` 에 인자로 얼마나 가져올 것인지 옵션을 넣어주면 된다.
 - 가져오는 데이터의 갯수를 한정시키면 네트워크 비용을 절약할 수 있다.
+- 어떤 데이터를 pagination 해서 가져올 경우 그와 관계된 것들도 paginate 해야한다
 
 ```ts
 // api/posts/[id]/index.ts
 const post = await client.post.findUnique({
-
-answers: {
+  // ...
+  answers: {
+    select: {
+      answer: true,
+      id: true,
+      user: {
         select: {
-          answer: true,
           id: true,
-          user: {
-            select: {
-              id: true,
-              name: true,
-              avatar: true,
-            },
-          },
+          name: true,
+          avatar: true,
         },
-        take: 10,
-        skip: 20,
       },
+    },
+    take: 10, // 10 개만 가져온다
+    skip: 20, // 앞에 20개 제외
+  },
 ```
+
+- api 요청을 보낼때 url 으로 page라는 파라미터를 이용해서 pagination 을 얼마나 가졍로지 결정할 수 있다.
+
+```tsx
+// pages/streams/index.ts
+const Streams: NextPage = () => {
+  const { data } = useSWR<StreamsResponse>(`/api/streams?page=3`); // page 파라미터를 받는다.
+```
+
+## Cloudfare images
+
+> 이미지 업로드 기능을 추가하자. <br>
+> Cloudfare images api 를 이용해서 이미지 업로드, 리사이징, 전송최적화(delivery optimization)을 배우자.
+
+- cloudfare images 는 용량과 무관 이미지 갯수에 요금을 부과한다.
+- 이미지 리사이징과 최적화는 요금이 무료
+- 이용자들은 이미지 용량을 신경쓰지 않기 때문에 좋은 선택지이다.
+
+### react-hook-form 으로 image 넣기
+
+- `type="file"` 인 input 에 name='avatar' 인 register 를 등록해주면 `onValid`함수가 avatar 를 받을 수 있다.
+- avatar 가 변경시 감지하기 : `watch` 를 이용한다. (watch는 모든 form 의 '변경' 을 감지한다.)
+- `URL.createObjectURL(file)` 는 브라우저 메모리에 저장된 `file` 의 URL 주소를 만들어서 반환한다.
+
+```tsx
+// pages/profile/edit.tsx
+const EditProfile: NextPage = () => {
+  const onValid = ({ email, phone, name, avatar }: EditProfileForm) => {
+    if (loading) return;
+    if (email === "" && phone === "" && name === "") {
+      return setError("formErrors", {
+        message: "Email OR Phone number are required. You need to choose one.",
+      });
+    }
+    editProfile({
+      email,
+      phone,
+      name,
+    });
+  };
+  useEffect(() => {
+    if (data && !data.ok && data.error) {
+      setError("formErrors", { message: data.error });
+    }
+  }, [data, setError]);
+  const [avatarPreview, setAvatarPreview] = useState("");
+  const avatar = watch("avatar"); // name=avatar 만 추적
+  useEffect(() => {
+    if (avatar && avatar.length > 0) {
+      const file = avatar[0];
+      setAvatarPreview(URL.createObjectURL(file));
+    }
+  }, [avatar]);
+  // return (
+    <form onSubmit={handleSubmit(onValid)} className="py-10 px-4 space-y-4">
+        <div className="flex items-center space-x-3">
+          {avatarPreview ? (
+            <img
+              src={avatarPreview}
+            />
+          ) : (
+            <div />
+          )}
+          <label
+            htmlFor="picture"
+          >
+            Change
+            <input
+              {...register("avatar")}
+              id="picture"
+              type="file"
+              className="hidden"
+              accept="image/*"
+            />
+          </label>
+```
+
+### Cloudflare : image 업로드 옵션
+
+- [Cloudflare](https://www.cloudflare.com/ko-kr/products/cloudflare-images/) 가입하기
+  - 옵션1 `Images Dashboard` : 관리자 권한이 있는 사람이 대시보드에 이미지를 드래그&드롭으로 업로드 하는 기능
+  - 옵션2 `API token` : api토큰을 받아서 유저가 업로드한 이미지가 백엔드로 오면, api 함수로 토큰과 POST 요청으로 이미지 업로드 (중간에 api 함수를 작동시켜야고 백엔드에 데이터를 보내는고 백엔드에서 나가는 데이터에 비용이 발생한다)
+  - 옵션3(선택) `Direct Creator Upload` : 유저에서 직접 Cloudflare 로 업로드한다.
+
+> Direct Create Upload
+
+1. 유저가 이미지 파일을 가지고 있다고 백엔드에 알려주면
+2. 백엔드는 Cloudflare 에 URL 을 달라고 한다.
+3. 유저에게 보안URL 을 만들어서 주고 (토큰노출x)
+4. 유저는 해당 URL 로 직접 Cloudflare 로 이미지를 업로드한다.(만약 업로드가 이뤄지지 않으면 Cloudflare 는 자동으로 url 을 비활성화)
+
+#### Cloudflare 셋업
+
+1. Cloudflare 대시보드
+2. [Images] 메뉴
+3. $5 / month 플랜을 선택해서 등록한다.
+
+![](readMeImages/2023-02-04-16-58-22.png) 4. [Use API] 탭 5. [Get an API token here]
+![](readMeImages/2023-02-04-17-03-56.png)
+
+6. [create token]
+   ![](readMeImages/2023-02-04-17-04-42.png)
+7. [Create Custom Token] 에서 [Get started] 버튼 클릭
+   ![](readMeImages/2023-02-04-17-05-40.png)
+8. [Token name] 을 임의로 기입하고
+9. [Permissions] 는 Account / Cloudflare Images / Edit
+   ![](readMeImages/2023-02-04-17-07-05.png)
+10. [Continue] - [Create Token] 으로 토큰을 만든다.
+11. 발급되는 토큰은 한번만 보여진다. 복사를 해서 `.env` 파일에 넣는다.
+    ![](readMeImages/2023-02-04-17-10-34.png)
+12. 대시보드로 가서 `Account ID` 도 `.env` 파일에 넣는다.
+    ![](readMeImages/2023-02-04-17-13-25.png)
+
+#### 이미지 업로드 api 핸들러
+
+> 백엔드에서 v2/direct_upload endpoint 로 호출할 때
+
+```
+curl --request POST \ --url https://api.cloudflare.com/client/v4/accounts/<ACCOUNT_ID>/images/v2/direct_upload \ --header 'Authorization: Bearer <API_TOKEN>' \ --form 'requireSignedURLs=true' \ --form 'metadata={"key":"value"}'
+```
+
+> response
+
+```json
+{
+  "result": {
+    "id": "2cdc28f0-017a-49c4-9ed7-87056c83901",
+    "uploadURL": "https://upload.imagedelivery.net/Vi7wi5KSItxGFsWRG2Us6Q/2cdc28f0-017a-49c4-9ed7-87056c83901"
+  },
+  "result_info": null,
+  "success": true,
+  "errors": [],
+  "messages": []
+}
+```
+
+- 유저의 이미지는 이렇게 응답받은 `uploadURL` 로 업로드 해야 한다.
+- id 는 백엔드에 저장해둬야 한다. (이미지가 업로드되면 이 id로 접근해야 하기 때문)
+
+> 적용
+
+```ts
+// pages/api/files.ts
+import { NextApiRequest, NextApiResponse } from "next";
+import withHandler, { ResponseType } from "@libs/server/withHandler";
+import client from "@libs/server/client";
+import { withApiSession } from "@libs/server/withSession";
+
+async function handler(
+  req: NextApiRequest,
+  res: NextApiResponse<ResponseType>
+) {
+  const response = await (
+    await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${process.env.CF_ID}/images/v1/direct_upload`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.CF_TOKEN}`,
+        },
+      }
+    )
+  ).json();
+  console.log(response);
+  res.json({
+    ok: true,
+    ...response.result, // result 안에는 id 와 uploadURL 이 있다.
+  });
+}
+
+export default withApiSession(
+  withHandler({
+    methods: ["GET"],
+    handler,
+  })
+);
+```
+
+- 유저가 이 핸들러로 POST 요청을 보내면 Cloudflare에서 uploadURL 을 받게 되고 그 URL을 이용해서 파일을 업로드 한다.
+
+```ts
+// pages/profile/edit.tsx
+const EditProfile: NextPage = () => {
+    const { user } = useUser();
+    const {
+    register,
+    setValue,
+    handleSubmit,
+    setError,
+    formState: { errors },
+    watch,
+  } = useForm<EditProfileForm>();
+
+  // 프로필을 수정하기 위한 POST 요청
+  const [editProfile, { data, loading }] =
+    useMutation<EditProfileResponse>(`/api/users/me`);
+    const onValid = async ({ email, phone, name, avatar }: EditProfileForm) => {
+    if (loading) return;
+    if (email === "" && phone === "" && name === "") {
+      return setError("formErrors", {
+        message: "Email OR Phone number are required. You need to choose one.",
+      });
+    }
+    if (avatar && avatar.length > 0 && user) {
+      const { uploadURL } = await (await fetch(`/api/files`)).json();
+      const form = new FormData();
+      form.append("file", avatar[0], user?.id + "");
+      const {
+        result: { id },
+      } = await (
+        await fetch(uploadURL, {
+          method: "POST",
+          body: form,
+        })
+      ).json();
+      editProfile({
+        email,
+        phone,
+        name,
+        avatarId: id,
+      });
+    } else {
+      editProfile({
+        email,
+        phone,
+        name,
+      });
+    }
+  };
+
+```
+
+> profile 을 바꾸고 update 하면 네트워크 탭에서 데이터를 받아온걸 볼수 있다.
+> ![](readMeImages/2023-02-04-19-44-53.png)
+> cloudflare 의 images 로 가면 업로드 된걸 알 수 있다.
+> ![](readMeImages/2023-02-04-19-46-42.png)
+
+> 이미지 id를 데이터베이스에 저장해서 어디서든 이미지를 사용할 수 있게 하자. <br>
+> (참고)이미지 업로드 요청할 때 받은 id와 uploadURL 로 POST 했을 때 받는 id는 서로 다른 값임.
+> URL 을 받기 위한 요청의 id는 필요가 없고, uploadURL 로 POST 할 때 받는 id가 필요한 id임
+> 해당 id 를 user 의 avatarId 로 저장하고 사용하자
+
+### avatarId 로 이미지 가져오기
+
+1. cloudflare 대시보드에서 `image delivery URL` 을 복사한다 : `https://imagedelivery.net/<Account_hash>/<image_id>/<variant_name>`
+   ![](readMeImages/2023-02-04-20-00-26.png)
+2. 해당 URL 을 커스텀해서 사용한다.
+
+```tsx
+// pages/profile/index.tsx
+{
+  user?.avatar ? (
+    <img
+      src={`https://imagedelivery.net/Account_hashAccount_hash/${user?.avatar}/public`}
+      className='w-16 h-16 bg-slate-500 rounded-full'
+    />
+  ) : (
+    <div className='w-16 h-16 bg-slate-500 rounded-full' />
+  );
+}
+```
+
+> 프로필 이미지를 업데이트 하면 적용된다.
+> ![](readMeImages/2023-02-04-20-07-54.png)
+
+### image resizing
+
+- 보통은 업로드 과정에서 리사이징을 거쳐 여러 사이즈의 이미지가 생성되지만 cloudflare 는 url 을 바탕으로 리사이징을 해준다.
+- 이미지 url 의 <variant> 가 그 역할을 해준다.
+- variant 는 20개까지 만들 수 있다. 디폴트 값은 public 이다
+
+#### variant 정하기
+
+1. cloudflare 의 `images` 탭에서 `Variants` 를 클릭한다.
+2. variant 이름을 입력하고 `Add New Variant`클릭 예-avatar
+   ![](readMeImages/2023-02-04-20-15-52.png)
+   ![](readMeImages/2023-02-04-20-17-52.png)
+3. 해당 variant 를 url 에 입력하면 이미지가 리사이징 된다.
+
+## NextJS Images
